@@ -1,0 +1,46 @@
+# systemd unit for hostmetrics.
+#
+# Instalação:
+#   sudo install -m 755 dist/hostmetrics-linux-amd64 /usr/local/bin/hostmetrics
+#   sudo install -m 644 deploy/hostmetrics.service /etc/systemd/system/hostmetrics.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hostmetrics
+#   journalctl -u hostmetrics -f
+#
+# Configuração: edite as variáveis Environment= abaixo, ou crie um drop-in com
+#   sudo systemctl edit hostmetrics
+
+[Unit]
+Description=Host metrics agent (JSON over HTTP)
+Documentation=https://github.com/gmsj/host-metrics-api
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hostmetrics
+Restart=on-failure
+RestartSec=5
+
+Environment=HOSTMETRICS_PORT=9900
+Environment=HOSTMETRICS_BIND=0.0.0.0
+Environment=HOSTMETRICS_INTERVAL=1s
+Environment=HOSTMETRICS_LOG_LEVEL=info
+
+# Nenhuma métrica exige root: /proc, /sys/class/hwmon e nvidia-smi são
+# legíveis por qualquer usuário. DynamicUser cria um usuário efêmero por
+# execução e o hardening abaixo limita o que o processo pode tocar.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+# nvidia-smi precisa dos device nodes /dev/nvidia*; PrivateDevices=yes os
+# esconderia e gpu_present ficaria false.
+PrivateDevices=no
+
+[Install]
+WantedBy=multi-user.target

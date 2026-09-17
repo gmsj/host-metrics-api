@@ -1,0 +1,46 @@
+# golangci-lint v2 configuration (https://golangci-lint.run/usage/configuration/).
+version: "2"
+
+run:
+  timeout: 3m
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/gmsj/host-metrics-api
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - misspell
+    - revive
+    - gosec
+    - errorlint
+    - gocritic
+    - unconvert
+    - noctx
+    - bodyclose
+    - prealloc
+    - nilerr
+  exclusions:
+    rules:
+      # Tests: fake data and helpers do not need error handling or doc comments.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - revive
+      # The nvidia-smi arguments are constants; gosec cannot see that (G204).
+      - path: internal/collector/gpu(_windows|_other)?\.go
+        linters:
+          - gosec
+        text: G204
