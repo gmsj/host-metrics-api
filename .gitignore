@@ -1,0 +1,13 @@
+# binários compilados
+/dist/
+/hostmetrics
+/hostmetrics.exe
+*.exe
+
+# cobertura
+*.out
+coverage.html
+
+# editor
+.vscode/
+.idea/
