@@ -20,7 +20,7 @@ make build            # binário para a plataforma atual
 curl -s localhost:9900/stats | python3 -m json.tool
 ```
 
-Ou, sem build: `make run ARGS="--port 9901 --log-level debug"`.
+Ou, sem build: `make run ARGS="--port 9901 --log-level debug"`. Isso é para desenvolvimento; para instalar de verdade veja [docs/instalacao.md](docs/instalacao.md).
 
 ## Contrato da API
 
@@ -143,52 +143,9 @@ make build-all       # os dois
 
 Os dois alvos rodam a partir de uma máquina Linux, sem toolchain extra: `CGO_ENABLED=0` mais `GOOS`/`GOARCH` bastam. O binário é estático, com cerca de 7 MB. A versão é injetada via `-ldflags "-X main.version=..."` a partir de `git describe --tags --always --dirty`; sobrescreva com `make build VERSION=0.1.0`.
 
-## Rodar como serviço
+## Instalar e rodar na máquina monitorada
 
-### Linux (systemd)
-
-A unit está em [`deploy/hostmetrics.service`](deploy/hostmetrics.service), com hardening e `DynamicUser` (nenhuma métrica exige root):
-
-```bash
-sudo install -m 755 dist/hostmetrics-linux-amd64 /usr/local/bin/hostmetrics
-sudo install -m 644 deploy/hostmetrics.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now hostmetrics
-journalctl -u hostmetrics -f
-```
-
-Para mudar configuração, `sudo systemctl edit hostmetrics` e sobrescreva as linhas `Environment=`.
-
-### Windows
-
-O binário é um programa de console comum: ele **não** fala o protocolo do Gerenciador de Serviços (SCM), então `sc create` sozinho não funciona (o SCM mata o processo após 30 s por "não responder"). Duas opções que funcionam:
-
-**Agendador de Tarefas** (zero dependência, recomendado). Em PowerShell como administrador:
-
-```powershell
-Copy-Item .\dist\hostmetrics-windows-amd64.exe "C:\Program Files\hostmetrics\hostmetrics.exe"
-$action  = New-ScheduledTaskAction -Execute "C:\Program Files\hostmetrics\hostmetrics.exe"
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName hostmetrics -Action $action -Trigger $trigger -Settings $settings `
-  -User "NT AUTHORITY\SYSTEM" -RunLevel Highest
-Start-ScheduledTask -TaskName hostmetrics
-```
-
-Executando como SYSTEM a tarefa roda sem usuário logado e sem janela. Configuração via variáveis de ambiente do sistema (`HOSTMETRICS_PORT` etc.) ou passando flags em `-Argument`.
-
-**Wrapper de serviço** (NSSM ou WinSW), se você prefere ver o agente em `services.msc`:
-
-```powershell
-nssm install hostmetrics "C:\Program Files\hostmetrics\hostmetrics.exe"
-nssm set hostmetrics AppEnvironmentExtra HOSTMETRICS_PORT=9900
-nssm start hostmetrics
-```
-
-> Serviço nativo: a biblioteca `golang.org/x/sys/windows/svc` já é dependência transitiva do gopsutil, então integrar o binário ao SCM não traria dependência nova. Ficou fora da v0.1 por decisão de escopo; se virar necessidade, é o caminho.
-
-Libere a porta no firewall do Windows: `New-NetFirewallRule -DisplayName hostmetrics -Direction Inbound -LocalPort 9900 -Protocol TCP -Action Allow -Profile Private`.
-
+Passo a passo completo em [docs/instalacao.md](docs/instalacao.md): teste rápido, instalação permanente (systemd no Ubuntu, tarefa agendada no Windows), configuração, firewall, atualização e desinstalação.
 ## Limitações conhecidas
 
 - **`cpu_temp_c` é sempre `null` no Windows.** A única fonte sem driver em ring-0 é a classe WMI `MSAcpi_ThermalZoneTemperature`, que exige elevação e, na maioria dos desktops modernos, devolve a temperatura de uma zona térmica ACPI da placa (ou nada), nunca a do core. Um número plausível e errado é pior que `null`, então não há heurística.
@@ -221,7 +178,8 @@ host-metrics-api/
 │   │   └── gpu_windows.go      # exec sem janela de console; gpu_other.go
 │   ├── sampler/                # ticker, deltas, unidades, snapshot atômico
 │   └── httpapi/                # handlers, headers, /healthz
-├── deploy/hostmetrics.service
+├── deploy/hostmetrics.service  # unit do systemd
+├── docs/instalacao.md          # guia de instalação e uso (Ubuntu e Windows)
 ├── Makefile
 └── .golangci.yml
 ```

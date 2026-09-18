@@ -1,14 +1,11 @@
 # systemd unit for hostmetrics.
 #
-# Instalação:
-#   sudo install -m 755 dist/hostmetrics-linux-amd64 /usr/local/bin/hostmetrics
-#   sudo install -m 644 deploy/hostmetrics.service /etc/systemd/system/hostmetrics.service
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now hostmetrics
-#   journalctl -u hostmetrics -f
+# Instalação, atualização e remoção: veja docs/instalacao.md.
+# Log: journalctl -u hostmetrics -f
 #
-# Configuração: edite as variáveis Environment= abaixo, ou crie um drop-in com
+# Configuração: não edite a cópia em /etc/systemd/system; crie um drop-in com
 #   sudo systemctl edit hostmetrics
+# e sobrescreva as linhas Environment= lá.
 
 [Unit]
 Description=Host metrics agent (JSON over HTTP)
