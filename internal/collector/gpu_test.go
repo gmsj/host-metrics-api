@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -181,6 +182,17 @@ func newTestNvidia(fake *fakeSMI, clock *time.Time) *NvidiaCollector {
 	return newNvidia(log, fake.run, func() time.Time { return *clock })
 }
 
+// newLoggingNvidia is newTestNvidia with the log captured, for tests that
+// assert on what was (or was not) logged.
+func newLoggingNvidia(fake *fakeSMI, clock *time.Time) (*NvidiaCollector, *bytes.Buffer) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return newNvidia(log, fake.run, func() time.Time { return *clock }), &buf
+}
+
+// cancelledOut mimics exec when the context is done: the child was killed.
+func cancelledOut() ([]byte, error) { return nil, errors.New("signal: killed") }
+
 func TestNvidiaAbsentBacksOff(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	fake := &fakeSMI{} // always "not found"
@@ -271,5 +283,90 @@ func TestNvidiaMalformedOutputIsFailure(t *testing.T) {
 	c := newTestNvidia(fake, &now)
 	if c.Collect(context.Background()).Present {
 		t.Error("malformed output must count as a failed probe")
+	}
+}
+
+// Ctrl+C or SIGTERM reaches the nvidia-smi child too (same process group /
+// cgroup / console), and the context kills it as well. A call that fails
+// while the parent context is cancelled is shutdown, not a GPU failure: no
+// warning, no state change.
+func TestNvidiaShutdownIsNotAFailure(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	fake := &fakeSMI{results: []func() ([]byte, error){okOut, cancelledOut}}
+	c, logBuf := newLoggingNvidia(fake, &now)
+
+	if !c.Collect(context.Background()).Present {
+		t.Fatal("expected present")
+	}
+	logBuf.Reset()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := c.Collect(ctx)
+	if !got.Present {
+		t.Error("presence must survive a cancelled call")
+	}
+	if c.failures != 0 {
+		t.Errorf("a cancelled call must not count as a failure, got %d", c.failures)
+	}
+	if strings.Contains(logBuf.String(), "level=WARN") {
+		t.Errorf("shutdown must not warn about nvidia-smi:\n%s", logBuf.String())
+	}
+}
+
+// Same during the very first probe: main cancels the context when the port is
+// already in use, and the killed probe must not report "gpu_present=false" as
+// if the machine had no GPU (nor start the 60 s backoff).
+func TestNvidiaShutdownDuringFirstProbeStaysQuiet(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	fake := &fakeSMI{results: []func() ([]byte, error){cancelledOut}}
+	c, logBuf := newLoggingNvidia(fake, &now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.Collect(ctx)
+	if !c.nextProbe.IsZero() {
+		t.Error("a cancelled probe must not schedule the absent backoff")
+	}
+	if strings.Contains(logBuf.String(), "gpu_present=false") {
+		t.Errorf("must not claim the GPU is absent on shutdown:\n%s", logBuf.String())
+	}
+}
+
+func TestNvidiaLogsRecoveryWithFailedTickCount(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	fake := &fakeSMI{results: []func() ([]byte, error){okOut, failOut, failOut, failOut, okOut}}
+	c, logBuf := newLoggingNvidia(fake, &now)
+
+	for i := 0; i < 5; i++ {
+		c.Collect(context.Background())
+	}
+	logs := logBuf.String()
+	if strings.Count(logs, "level=WARN") != 1 {
+		t.Errorf("want exactly one WARN for a failure streak, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, `msg="nvidia-smi recovered" failed_ticks=3`) {
+		t.Errorf("want a recovery line with the streak length, got:\n%s", logs)
+	}
+}
+
+func TestOneLineKeepsStdoutAndStderr(t *testing.T) {
+	got := oneLine(
+		[]byte("Unable to determine the device handle for GPU 0000:01:00.0:\n  Unknown Error\n"),
+		[]byte(""),
+	)
+	want := "Unable to determine the device handle for GPU 0000:01:00.0: Unknown Error"
+	if got != want {
+		t.Errorf("oneLine = %q, want %q", got, want)
+	}
+	if got := oneLine([]byte("out"), []byte("err")); got != "out | err" {
+		t.Errorf("oneLine = %q, want %q", got, "out | err")
+	}
+	if got := oneLine(nil, nil); got != "" {
+		t.Errorf("oneLine of nothing = %q, want empty", got)
+	}
+	long := oneLine([]byte(strings.Repeat("x", 1000)))
+	if len(long) != 303 || !strings.HasSuffix(long, "...") {
+		t.Errorf("oneLine must cap length, got %d chars", len(long))
 	}
 }

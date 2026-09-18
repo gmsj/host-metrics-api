@@ -71,6 +71,7 @@ Regras do contrato:
 - **Números vêm arredondados a uma casa decimal.** Go serializa `88.0` como `88`, sem ponto; um parser que decide o tipo pela presença do ponto deve tratar todos os campos numéricos como float.
 - **Unidades:** capacidades em base binária (`_gb` = GiB, `_mb` = MiB), que é o que o Gerenciador de Tarefas, `free -h` e `nvidia-smi` mostram. Taxas em base decimal: rede em megabits por segundo (`_mbps`, 10⁶ bit/s), disco em megabytes por segundo (`_mb_s`, 10⁶ byte/s).
 - **Antes do primeiro snapshot** (um intervalo após o start, 1 s por padrão) todos os endpoints respondem `503` com `{"error":"no snapshot yet"}`.
+- **Os campos `gpu_*` podem estar até um intervalo atrás de `ts`.** O `nvidia-smi` roda num loop próprio e o snapshot leva a última leitura pronta. Se essa leitura ficar com mais de 3 intervalos de idade (`nvidia-smi` travado ou lentíssimo), os números vêm `null` e `gpu_present` mantém o último estado conhecido.
 
 ### `GET /stats/cores`
 
@@ -108,7 +109,7 @@ Cada métrica tem uma **natureza**. Ela define se faz sentido tirar média e exp
 | `disk_used_gb` / `disk_total_gb` / `disk_pct` | Espaço do volume monitorado (`--disk`), GiB. `pct = used / total` | pontual | ✅ | ✅ |
 | `disk_read_mb_s` / `disk_write_mb_s` | Throughput de I/O somado dos **discos físicos** (Linux) ou dos volumes lógicos (Windows), em MB/s | **janela de 1 s** | ✅ | ✅ |
 | `net_rx_mbps` / `net_tx_mbps` | Throughput da interface monitorada (`--net-iface`), em Mbit/s | **janela de 1 s** | ✅ | ✅ |
-| `gpu_present` | `false` quando `nvidia-smi` não existe ou falha repetidamente. Quando `false`, todos os `gpu_*` são `null` | estado | ✅ | ✅ |
+| `gpu_present` | `false` quando `nvidia-smi` não existe ou falha 5 vezes seguidas. Quando `false`, todos os `gpu_*` são `null`. `true` com todos os `gpu_*` em `null` significa que a placa existe mas a leitura falhou ou está velha demais | estado | ✅ | ✅ |
 | `gpu_pct` | Uso do núcleo gráfico. ⚠️ Pré-agregado numa janela interna do driver, não na nossa | janela do driver | ✅ | ✅ |
 | `gpu_temp_c` | Temperatura do die da GPU. A única temperatura simétrica entre os dois sistemas | pontual | ✅ | ✅ |
 | `gpu_vram_used_mb` / `_total_mb` / `_pct` | VRAM alocada, MiB | pontual | ✅ | ✅ |
@@ -156,6 +157,7 @@ Passo a passo completo em [docs/instalacao.md](docs/instalacao.md): teste rápid
 - **Uma única GPU.** Se `nvidia-smi` listar mais de uma, o agente usa a primeira e avisa uma vez no log.
 - **Reset de contador.** Quando um contador cumulativo volta a zero (interface recriada, driver recarregado), a taxa daquele tick vem `null` em vez de um número negativo enorme. O tick seguinte já tem baseline nova.
 - **Primeiro snapshot leva um intervalo.** O sampler faz uma leitura de aquecimento no start e só publica no primeiro tick. Até lá, `503`.
+- **`gpu_*` não é do mesmo instante que o resto.** A leitura de GPU acontece em loop próprio, com o mesmo intervalo, e o snapshot usa a mais recente disponível. Em condições normais a diferença é menor que um intervalo; num `nvidia-smi` lento (comum no Windows quando o driver acorda a placa) o sistema continua atualizado e só a GPU envelhece.
 
 ## Segurança
 
@@ -188,9 +190,9 @@ O desenho central: **nenhuma coleta acontece no handler HTTP**. Uma goroutine co
 
 1. `cpu.Percent(0)` mede o delta desde a chamada anterior, e essa baseline é estado global dentro do gopsutil. Dois clientes coletando sob demanda roubariam a baseline um do outro.
 2. Contadores de rede e disco são cumulativos; taxa exige guardar a leitura anterior. Esse estado tem um único dono.
-3. `nvidia-smi` é um spawn de processo de 100 a 300 ms que não pode estar no caminho da request. O sampler o roda em paralelo com a coleta de sistema.
+3. `nvidia-smi` é um spawn de processo de 100 a 300 ms (segundos, às vezes, no Windows) que não pode estar no caminho da request nem no caminho do tick. Ele roda numa segunda goroutine com ticker próprio e publica a última leitura noutro `atomic.Pointer`; o tick de sistema só lê o que estiver lá. Um `nvidia-smi` lento ou travado não atrasa CPU, RAM e rede, e não faz o `/healthz` acusar `stale` num agente saudável.
 
-Falha de um coletor individual vira `null` naquele campo e um `warn` no log (uma vez, não a cada tick); os outros campos seguem.
+Falha de um coletor individual vira `null` naquele campo e um `warn` no log (uma vez por episódio, com uma linha `info` na recuperação); os outros campos seguem. Falha causada pelo próprio encerramento (Ctrl+C ou SIGTERM também chegam ao `nvidia-smi` filho) não é logada.
 
 ## Desenvolvimento
 
@@ -285,7 +287,7 @@ defer cancel()   // roda ao sair da função, como o __exit__ do `with`
 
 **Interfaces são implícitas.** `collector.System` é uma interface com um método `Collect`. `SystemCollector` a satisfaz sem declarar nada, e o `fakeSystem` dos testes também. É duck typing verificado em compilação. O sampler recebe a interface, então é testável sem hardware.
 
-**Goroutines e `context`.** Uma goroutine é uma função rodando concorrentemente (`go smp.Run(ctx)`). Este projeto usa poucas: uma para o sampler, uma para o servidor HTTP, e duas curtas por tick para coletar sistema e GPU em paralelo (`sync.WaitGroup` espera as duas). `context.Context` é o mecanismo de cancelamento: em `main.go`, `signal.NotifyContext` cancela o contexto quando chega SIGINT/SIGTERM, e tudo que recebeu esse `ctx` (o loop do sampler, o timeout do `nvidia-smi`) encerra.
+**Goroutines e `context`.** Uma goroutine é uma função rodando concorrentemente (`go smp.Run(ctx)`). Este projeto usa poucas: uma para o tick de sistema, uma para o loop de GPU e uma para o servidor HTTP (`sync.WaitGroup` em `Run` espera o loop de GPU antes de retornar). `context.Context` é o mecanismo de cancelamento: em `main.go`, `signal.NotifyContext` cancela o contexto quando chega SIGINT/SIGTERM, e tudo que recebeu esse `ctx` (os dois loops, o timeout do `nvidia-smi`) encerra. Nem tudo obedece ao contexto, porém: as leituras do gopsutil o ignoram na prática, e por isso `main.go` espera o sampler com limite de tempo em vez de para sempre.
 
 **`atomic.Pointer[T]` é o padrão central.** O sampler monta um `*model.Snapshot` novo a cada tick e faz `Store`; cada handler HTTP faz `Load`. Funciona sem mutex porque o snapshot **nunca é modificado depois de publicado**: quem lê tem um ponteiro para um valor imutável, e o próximo tick cria outro valor em vez de mexer neste. Leitura lock-free para qualquer número de clientes, escrita por um único dono. Compare com Python, onde você usaria um `threading.Lock` em volta de um dict compartilhado.
 

@@ -99,7 +99,7 @@ func run() error {
 		log.Info("shutdown signal received")
 	case err := <-serverErr:
 		stop()
-		<-samplerDone
+		waitSampler(log, samplerDone)
 		return fmt.Errorf("http server: %w", err)
 	}
 
@@ -110,7 +110,21 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Warn("http server shutdown", "err", err)
 	}
-	<-samplerDone
+	waitSampler(log, samplerDone)
 	log.Info("stopped")
 	return nil
+}
+
+// waitSampler waits for the sampler to stop, but not forever. Most of what a
+// tick does ignores the context (gopsutil reads, a nvidia-smi stuck inside a
+// wedged driver that even SIGKILL cannot reap), so an unbounded wait here is
+// exactly how an agent ends up printing "shutdown signal received" and never
+// exiting. Past the limit the process exits with the goroutine still running;
+// the OS reclaims it.
+func waitSampler(log *slog.Logger, samplerDone <-chan struct{}) {
+	select {
+	case <-samplerDone:
+	case <-time.After(shutdownTimeout):
+		log.Warn("sampler did not stop in time; exiting anyway", "waited", shutdownTimeout)
+	}
 }

@@ -1,7 +1,6 @@
 package collector
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,8 +13,12 @@ import (
 
 const (
 	// nvidiaSMITimeout bounds one nvidia-smi call. A wedged driver must not
-	// freeze the sampler; the tick just publishes null for the GPU fields.
-	nvidiaSMITimeout = 2 * time.Second
+	// freeze the GPU loop forever; the reading just becomes null. Generous on
+	// purpose: on Windows a call can take seconds when the driver has to wake
+	// a power-gated GPU, and since the sampler no longer waits for this call
+	// (see sampler.runGPU) a slow one costs nothing but a slightly older
+	// gpu_* reading.
+	nvidiaSMITimeout = 5 * time.Second
 	// gpuRetryInterval is how long to wait before probing again after the GPU
 	// was found absent. Long enough not to spam the log or spawn processes
 	// for nothing on a machine without NVIDIA hardware.
@@ -71,25 +74,32 @@ func newNvidia(log *slog.Logger, run smiRunner, now func() time.Time) *NvidiaCol
 }
 
 // Collect runs nvidia-smi (subject to the backoff) and parses its output.
+//
+// When ctx itself is cancelled (shutdown) the call is abandoned quietly: the
+// child gets killed, or dies first from the same Ctrl+C / SIGTERM the agent
+// received, and neither says anything about the GPU.
 func (c *NvidiaCollector) Collect(ctx context.Context) GPUSample {
 	now := c.now()
 	if !c.present && now.Before(c.nextProbe) {
 		return GPUSample{}
 	}
 
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, nvidiaSMITimeout)
 	defer cancel()
 
 	out, err := c.run(ctx)
-	if err != nil {
-		return c.onFailure(now, err)
+	if err == nil {
+		var parsed parsedGPU
+		if parsed, err = parseNvidiaSMI(out); err == nil {
+			c.onSuccess(parsed.extraLines)
+			return parsed.sample
+		}
 	}
-	parsed, err := parseNvidiaSMI(out)
-	if err != nil {
-		return c.onFailure(now, err)
+	if parent.Err() != nil {
+		return GPUSample{Present: c.present}
 	}
-	c.onSuccess(parsed.extraLines)
-	return parsed.sample
+	return c.onFailure(now, c.now().Sub(now), err)
 }
 
 func (c *NvidiaCollector) onSuccess(extraLines int) {
@@ -97,6 +107,9 @@ func (c *NvidiaCollector) onSuccess(extraLines int) {
 		c.log.Info("NVIDIA GPU detected; gpu_present=true")
 		c.present = true
 		c.loggedAbsent = false
+	}
+	if c.failures > 0 {
+		c.log.Info("nvidia-smi recovered", "failed_ticks", c.failures)
 	}
 	c.failures = 0
 	if extraLines > 0 && !c.warnedMultiGPU {
@@ -107,13 +120,16 @@ func (c *NvidiaCollector) onSuccess(extraLines int) {
 	}
 }
 
-func (c *NvidiaCollector) onFailure(now time.Time, err error) GPUSample {
+// onFailure updates the presence state after a failed call. took is how long
+// the call lasted: on a timeout it tells whether nvidia-smi was merely slow or
+// hung, which the error text alone does not.
+func (c *NvidiaCollector) onFailure(now time.Time, took time.Duration, err error) GPUSample {
 	if !c.present {
 		c.nextProbe = now.Add(gpuRetryInterval)
 		if c.loggedAbsent {
-			c.log.Debug("nvidia-smi still unavailable", "err", err)
+			c.log.Debug("nvidia-smi still unavailable", "err", err, "took", took)
 		} else {
-			c.log.Info("nvidia-smi unavailable; gpu_present=false", "err", err, "retry_every", gpuRetryInterval)
+			c.log.Info("nvidia-smi unavailable; gpu_present=false", "err", err, "took", took, "retry_every", gpuRetryInterval)
 			c.loggedAbsent = true
 		}
 		return GPUSample{}
@@ -121,7 +137,7 @@ func (c *NvidiaCollector) onFailure(now time.Time, err error) GPUSample {
 
 	c.failures++
 	if c.failures >= gpuMaxFailures {
-		c.log.Warn("nvidia-smi failed repeatedly; marking GPU absent", "failures", c.failures, "err", err)
+		c.log.Warn("nvidia-smi failed repeatedly; marking GPU absent", "failures", c.failures, "err", err, "took", took)
 		c.present = false
 		c.failures = 0
 		c.nextProbe = now.Add(gpuRetryInterval)
@@ -129,9 +145,9 @@ func (c *NvidiaCollector) onFailure(now time.Time, err error) GPUSample {
 		return GPUSample{}
 	}
 	if c.failures == 1 {
-		c.log.Warn("nvidia-smi failed; gpu_* fields null this tick", "err", err)
+		c.log.Warn("nvidia-smi failed; gpu_* fields null until it recovers", "err", err, "took", took)
 	} else {
-		c.log.Debug("nvidia-smi failed again", "failures", c.failures, "err", err)
+		c.log.Debug("nvidia-smi failed again", "failures", c.failures, "err", err, "took", took)
 	}
 	return GPUSample{Present: true}
 }
@@ -146,13 +162,36 @@ func runNvidiaSMI(ctx context.Context) ([]byte, error) {
 	cmd.WaitDelay = 500 * time.Millisecond
 	out, err := cmd.Output()
 	if err != nil {
+		// nvidia-smi prints its own diagnostics ("Unable to determine the
+		// device handle for GPU ...", "NVIDIA-SMI has failed because ...") to
+		// STDOUT, not stderr. Output still returns that stdout alongside the
+		// error, so keep both: without it "exit status 1" is undiagnosable.
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
-			return nil, fmt.Errorf("%w: %s", err, bytes.TrimSpace(exitErr.Stderr))
+		if errors.As(err, &exitErr) {
+			if detail := oneLine(out, exitErr.Stderr); detail != "" {
+				return nil, fmt.Errorf("%w: %s", err, detail)
+			}
 		}
 		return nil, err
 	}
 	return out, nil
+}
+
+// oneLine joins the process's stdout and stderr into a single log-friendly
+// line: whitespace collapsed, capped in length.
+func oneLine(chunks ...[]byte) string {
+	const maxLen = 300
+	var parts []string
+	for _, c := range chunks {
+		if s := strings.Join(strings.Fields(string(c)), " "); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	s := strings.Join(parts, " | ")
+	if len(s) > maxLen {
+		s = s[:maxLen] + "..."
+	}
+	return s
 }
 
 type parsedGPU struct {

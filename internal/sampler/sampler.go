@@ -10,6 +10,12 @@
 //   - the cost of collection is constant and independent of the number of
 //     consumers;
 //   - a request never waits on nvidia-smi or any syscall.
+//
+// The GPU is read by a second goroutine with its own ticker (runGPU). The
+// system tick only picks up the latest GPU reading, so a slow or hung
+// nvidia-smi (seconds on Windows when the driver wakes a power-gated card)
+// never delays cpu/ram/net and never makes /healthz report a healthy agent
+// as stale. The price is that gpu_* may be up to one interval older than ts.
 package sampler
 
 import (
@@ -31,6 +37,12 @@ type Config struct {
 	Static   collector.Static
 }
 
+// gpuStaleTicks is how many intervals a GPU reading may lag behind the system
+// tick before its fields are published as null. It matches the /healthz rule
+// (healthTicks in main): older than that and nvidia-smi is hung or crawling,
+// and repeating a stale number would look like a live one.
+const gpuStaleTicks = 3
+
 // Sampler owns the collection loop. Create it with New, run it with Run.
 type Sampler struct {
 	log *slog.Logger
@@ -45,9 +57,26 @@ type Sampler struct {
 	// which is what makes this safe without a mutex.
 	snap atomic.Pointer[model.Snapshot]
 
+	// gpuLatest is the hand-off between the GPU goroutine (Store) and the
+	// system tick (Load), same immutable-value pattern as snap.
+	gpuLatest atomic.Pointer[gpuReading]
+	// gpuStale remembers whether the last tick found the GPU reading too old,
+	// so the warning is logged once per episode. Only the tick goroutine
+	// touches it.
+	gpuStale bool
+
 	// prev holds the previous tick's cumulative counters. Only the sampler
 	// goroutine touches it, so no synchronization is needed.
 	prev counters
+}
+
+// gpuReading is one GPU sample with the time its collection finished. The
+// finish time is what ages when nvidia-smi stops answering, which is the case
+// the staleness rule exists for; stamping the start would also flag a single
+// slow-but-successful call, and that is the collector's log line, not ours.
+type gpuReading struct {
+	at     time.Time
+	sample collector.GPUSample
 }
 
 type counters struct {
@@ -69,8 +98,15 @@ func (s *Sampler) Snapshot() *model.Snapshot {
 	return s.snap.Load()
 }
 
-// Run blocks until ctx is cancelled.
+// Run blocks until ctx is cancelled and both loops have returned.
 func (s *Sampler) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runGPU(ctx)
+	}()
+
 	// Priming pass. cpu.Percent needs a baseline call, and the rates need a
 	// previous counter reading; without this the first snapshot would show
 	// cpu_pct = 0 and null rates. The result is discarded, so the first
@@ -84,6 +120,7 @@ func (s *Sampler) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			wg.Wait()
 			s.log.Info("sampler stopped")
 			return
 		case <-ticker.C:
@@ -92,41 +129,69 @@ func (s *Sampler) Run(ctx context.Context) {
 	}
 }
 
+// runGPU is the GPU loop: one reading right away, so the first snapshot
+// already carries gpu_* fields, then one per interval. A reading that takes
+// longer than the interval just makes the ticker skip; readings never pile up.
+func (s *Sampler) runGPU(ctx context.Context) {
+	s.readGPU(ctx)
+	ticker := time.NewTicker(s.cfg.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.readGPU(ctx)
+		}
+	}
+}
+
+// readGPU takes one GPU reading and publishes it for the next tick. On
+// shutdown the reading is dropped: the killed nvidia-smi says nothing.
+func (s *Sampler) readGPU(ctx context.Context) {
+	sample := s.gpu.Collect(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	s.gpuLatest.Store(&gpuReading{at: s.now(), sample: sample})
+}
+
+// latestGPU returns the GPU reading the tick at now should publish. A
+// reading older than gpuStaleTicks intervals keeps gpu_present (that is
+// state, not a measurement) but drops the numbers.
+func (s *Sampler) latestGPU(now time.Time) collector.GPUSample {
+	r := s.gpuLatest.Load()
+	if r == nil {
+		return collector.GPUSample{}
+	}
+	age := now.Sub(r.at)
+	if age <= gpuStaleTicks*s.cfg.Interval {
+		if s.gpuStale {
+			s.gpuStale = false
+			s.log.Info("gpu reading fresh again")
+		}
+		return r.sample
+	}
+	if !s.gpuStale {
+		s.gpuStale = true
+		s.log.Warn("gpu reading stale; gpu_* fields null until nvidia-smi answers again", "age", age)
+	}
+	return collector.GPUSample{Present: r.sample.Present}
+}
+
 func (s *Sampler) prime(ctx context.Context) {
 	now := s.now()
-	sys, _ := s.collect(ctx)
-	s.remember(now, sys)
+	s.remember(now, s.sys.Collect(ctx))
 }
 
-// tick performs one full collection and publishes the result.
+// tick performs one system collection and publishes it together with the
+// latest GPU reading.
 func (s *Sampler) tick(ctx context.Context) {
 	now := s.now()
-	sys, gpu := s.collect(ctx)
-	snap := s.build(now, sys, gpu)
+	sys := s.sys.Collect(ctx)
+	snap := s.build(now, sys, s.latestGPU(now))
 	s.remember(now, sys)
 	s.snap.Store(snap)
-}
-
-// collect runs the system and GPU collectors concurrently, so the 100-300 ms
-// of a nvidia-smi spawn overlap with the (much cheaper) gopsutil reads
-// instead of adding to them.
-func (s *Sampler) collect(ctx context.Context) (collector.Sample, collector.GPUSample) {
-	var (
-		sys collector.Sample
-		gpu collector.GPUSample
-		wg  sync.WaitGroup
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		sys = s.sys.Collect(ctx)
-	}()
-	go func() {
-		defer wg.Done()
-		gpu = s.gpu.Collect(ctx)
-	}()
-	wg.Wait()
-	return sys, gpu
 }
 
 func (s *Sampler) remember(now time.Time, sys collector.Sample) {

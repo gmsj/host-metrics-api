@@ -75,6 +75,7 @@ func TestSamplerPublishesAfterPriming(t *testing.T) {
 	if s.Snapshot() != nil {
 		t.Fatal("no snapshot may exist before the first tick")
 	}
+	s.readGPU(context.Background())
 	s.prime(context.Background())
 	if s.Snapshot() != nil {
 		t.Fatal("priming must not publish")
@@ -140,6 +141,7 @@ func TestSamplerPartialFailureYieldsNulls(t *testing.T) {
 	// Everything failed except RAM: the sampler must still publish.
 	sys := &fakeSystem{samples: []collector.Sample{{RAMTotalB: u(8 * gib), RAMAvailB: u(4 * gib)}}}
 	s, clock := newTestSampler(sys, fakeGPU{}, start)
+	s.readGPU(context.Background())
 	s.prime(context.Background())
 	*clock = start.Add(time.Second)
 	s.tick(context.Background())
@@ -207,6 +209,69 @@ func TestSamplerCounterResetPublishesNullOnce(t *testing.T) {
 	s.tick(context.Background())
 	if got := s.Snapshot().Stats.NetRxMbps; got == nil || *got != 8 {
 		t.Errorf("tick 3: baseline must be fresh after a reset, want 8, got %v", got)
+	}
+}
+
+// The GPU loop runs on its own; the tick publishes whatever it last stored.
+// Once that reading is older than gpuStaleTicks intervals the numbers go
+// null (presence stays), and a fresh reading brings them back.
+func TestSamplerStaleGPUReadingYieldsNulls(t *testing.T) {
+	start := time.Unix(1_000, 0)
+	sys := &fakeSystem{samples: []collector.Sample{fullSample(0, 0)}}
+	gpu := fakeGPU{collector.GPUSample{Present: true, UtilPct: fl(42), TempC: fl(60)}}
+	s, clock := newTestSampler(sys, gpu, start)
+	s.readGPU(context.Background()) // at t=0
+	s.prime(context.Background())
+
+	*clock = start.Add(1 * time.Second)
+	s.tick(context.Background())
+	if st := s.Snapshot().Stats; !st.GPUPresent || st.GPUPct == nil || *st.GPUPct != 42 {
+		t.Fatalf("tick 1 must publish the reading taken 1 s earlier: %+v", st)
+	}
+
+	*clock = start.Add(3 * time.Second) // exactly gpuStaleTicks old: still fresh
+	s.tick(context.Background())
+	if st := s.Snapshot().Stats; st.GPUPct == nil {
+		t.Error("a reading exactly gpuStaleTicks intervals old is still fresh")
+	}
+
+	*clock = start.Add(4 * time.Second) // older than that: numbers go null
+	s.tick(context.Background())
+	if st := s.Snapshot().Stats; !st.GPUPresent || st.GPUPct != nil || st.GPUTempC != nil {
+		t.Errorf("stale reading: want gpu_present=true with null numbers, got %+v", st)
+	}
+
+	s.readGPU(context.Background()) // nvidia-smi answers again at t=4
+	*clock = start.Add(5 * time.Second)
+	s.tick(context.Background())
+	if st := s.Snapshot().Stats; st.GPUPct == nil || *st.GPUPct != 42 {
+		t.Errorf("fresh reading must bring the numbers back: %+v", st)
+	}
+}
+
+func TestSamplerTickBeforeAnyGPUReadingIsAbsent(t *testing.T) {
+	start := time.Unix(1_000, 0)
+	sys := &fakeSystem{samples: []collector.Sample{fullSample(0, 0)}}
+	gpu := fakeGPU{collector.GPUSample{Present: true, UtilPct: fl(42)}}
+	s, clock := newTestSampler(sys, gpu, start)
+	s.prime(context.Background())
+	*clock = start.Add(time.Second)
+	s.tick(context.Background())
+	if st := s.Snapshot().Stats; st.GPUPresent || st.GPUPct != nil {
+		t.Errorf("no reading yet: want gpu_present=false and nulls, got %+v", st)
+	}
+}
+
+// A reading interrupted by shutdown is dropped rather than published.
+func TestSamplerReadGPUDropsReadingOnCancel(t *testing.T) {
+	start := time.Unix(1_000, 0)
+	sys := &fakeSystem{samples: []collector.Sample{fullSample(0, 0)}}
+	s, _ := newTestSampler(sys, fakeGPU{collector.GPUSample{Present: true}}, start)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.readGPU(ctx)
+	if s.gpuLatest.Load() != nil {
+		t.Error("a reading taken under a cancelled context must not be stored")
 	}
 }
 

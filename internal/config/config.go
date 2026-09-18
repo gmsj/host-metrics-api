@@ -16,9 +16,10 @@ import (
 // EnvPrefix is prepended to every environment variable name.
 const EnvPrefix = "HOSTMETRICS_"
 
-// MinInterval is the smallest sampler period accepted. nvidia-smi alone costs
-// 100-300 ms per call, so anything shorter than this would make the tick
-// longer than the interval and the ticker would start dropping ticks.
+// MinInterval is the smallest sampler period accepted. The GPU loop runs
+// nvidia-smi once per interval and a call costs 100-300 ms (more on Windows),
+// so anything shorter than this would make that loop skip most of its ticks
+// and gpu_* would lag further behind ts than the interval promises.
 const MinInterval = 500 * time.Millisecond
 
 // Config holds every runtime option of the agent.
