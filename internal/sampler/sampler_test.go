@@ -213,8 +213,8 @@ func TestSamplerCounterResetPublishesNullOnce(t *testing.T) {
 }
 
 // The GPU loop runs on its own; the tick publishes whatever it last stored.
-// Once that reading is older than gpuStaleTicks intervals the numbers go
-// null (presence stays), and a fresh reading brings them back.
+// Once that reading is older than StaleTicks intervals the numbers go null
+// (presence stays), and a fresh reading brings them back.
 func TestSamplerStaleGPUReadingYieldsNulls(t *testing.T) {
 	start := time.Unix(1_000, 0)
 	sys := &fakeSystem{samples: []collector.Sample{fullSample(0, 0)}}
@@ -229,10 +229,10 @@ func TestSamplerStaleGPUReadingYieldsNulls(t *testing.T) {
 		t.Fatalf("tick 1 must publish the reading taken 1 s earlier: %+v", st)
 	}
 
-	*clock = start.Add(3 * time.Second) // exactly gpuStaleTicks old: still fresh
+	*clock = start.Add(StaleTicks * time.Second) // exactly StaleTicks old: still fresh
 	s.tick(context.Background())
 	if st := s.Snapshot().Stats; st.GPUPct == nil {
-		t.Error("a reading exactly gpuStaleTicks intervals old is still fresh")
+		t.Error("a reading exactly StaleTicks intervals old is still fresh")
 	}
 
 	*clock = start.Add(4 * time.Second) // older than that: numbers go null
@@ -284,7 +284,9 @@ func TestSamplerRunStopsOnCancel(t *testing.T) {
 		s.Run(ctx)
 		close(done)
 	}()
-	deadline := time.After(2 * time.Second)
+	// Generous on purpose: this is the one test that depends on wall-clock
+	// time, and a loaded CI runner must not turn it into a flake.
+	deadline := time.After(10 * time.Second)
 	for s.Snapshot() == nil {
 		select {
 		case <-deadline:

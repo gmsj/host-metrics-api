@@ -1,0 +1,64 @@
+# GoReleaser configuration (https://goreleaser.com). Run by the Release
+# workflow on every v* tag. To try it locally without publishing:
+#   goreleaser release --snapshot --clean
+version: 2
+
+project_name: hostmetrics
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hostmetrics
+    main: ./cmd/hostmetrics
+    binary: hostmetrics
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+    flags:
+      - -trimpath
+    # Same flags as the Makefile. {{ .Version }} is the tag without the "v",
+    # so agent_version reads "0.1.0", matching the README example.
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  # Raw binaries, not tarballs: the install guide copies a single file, and
+  # the names match what `make build-all` produces in dist/.
+  - formats: [binary]
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^feat(\(.*\))?!?:'
+      order: 0
+    - title: Bug fixes
+      regexp: '^fix(\(.*\))?!?:'
+      order: 1
+    - title: Other changes
+      order: 999
+  filters:
+    exclude:
+      - "^docs"
+      - "^chore"
+      - "^ci"
+      - "^test"
+
+release:
+  footer: |
+    ## Instalação
+
+    Baixe o binário da sua plataforma acima e siga o
+    [guia de instalação](https://github.com/gmsj/host-metrics-api/blob/main/docs/instalacao.md).
+    Confira o download com `sha256sum -c checksums.txt`.

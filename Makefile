@@ -4,7 +4,9 @@ DIST     := dist
 
 # Git tag when the commit is tagged, otherwise the short SHA (plus -dirty when
 # the tree has uncommitted changes). Falls back to "dev" outside a git repo.
-VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# The leading "v" is stripped so a local build of a tagged commit reports the
+# same agent_version ("0.1.0") as the GoReleaser build of that tag.
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo dev)
 
 # -s -w strip the symbol table and DWARF debug info (smaller binary, no effect
 # on stack traces). -X sets the package-level `version` variable in main.
@@ -13,7 +15,7 @@ GOFLAGS  := -trimpath
 GOEXE    := $(shell go env GOEXE)
 
 .DEFAULT_GOAL := help
-.PHONY: help run build build-linux build-windows build-all test cover vet lint fmt tidy clean
+.PHONY: help run build build-linux build-windows build-all test cover vet lint vuln fmt tidy clean
 
 help: ## Lista os alvos disponíveis
 	@awk 'BEGIN {FS = ":.*## "; printf "Uso: make <alvo>\n\n"} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -46,6 +48,9 @@ vet: ## go vet para Linux e para Windows (compila os arquivos com build tag wind
 
 lint: vet ## golangci-lint
 	golangci-lint run ./...
+
+vuln: ## Vulnerabilidades conhecidas nas dependências (o CI roda o mesmo)
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 fmt: ## Formata o código (gofumpt se instalado, senão gofmt)
 	@if command -v gofumpt >/dev/null 2>&1; then gofumpt -l -w .; else gofmt -l -w .; fi

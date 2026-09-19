@@ -254,22 +254,32 @@ func (c *SystemCollector) collectUptime(ctx context.Context, s *Sample) {
 // flip between interfaces mid-run, and summing all of them double counts
 // bridge/veth pairs on a host that runs Docker.
 func pickNetIface(ctx context.Context, log *slog.Logger) string {
-	loopback := make(map[string]bool)
 	ifaces, err := gnet.InterfacesWithContext(ctx)
 	if err != nil {
 		log.Warn("cannot list interfaces; net rates disabled", "err", err)
 		return ""
 	}
-	for _, iface := range ifaces {
-		if slices.Contains(iface.Flags, "loopback") {
-			loopback[iface.Name] = true
-		}
-	}
-
 	counters, err := gnet.IOCountersWithContext(ctx, true)
 	if err != nil {
 		log.Warn("cannot read interface counters; net rates disabled", "err", err)
 		return ""
+	}
+	best := busiestInterface(ifaces, counters)
+	if best == "" {
+		log.Warn("no non-loopback interface found; net rates disabled")
+	}
+	return best
+}
+
+// busiestInterface returns the name of the non-loopback interface with the
+// most cumulative traffic, or "" when there is none. Pure: the OS reads live
+// in pickNetIface, the choice lives here where it can be tested.
+func busiestInterface(ifaces []gnet.InterfaceStat, counters []gnet.IOCountersStat) string {
+	loopback := make(map[string]bool)
+	for _, iface := range ifaces {
+		if slices.Contains(iface.Flags, "loopback") {
+			loopback[iface.Name] = true
+		}
 	}
 	best, bestBytes := "", uint64(0)
 	for _, io := range counters {
@@ -279,9 +289,6 @@ func pickNetIface(ctx context.Context, log *slog.Logger) string {
 		if total := io.BytesRecv + io.BytesSent; best == "" || total > bestBytes {
 			best, bestBytes = io.Name, total
 		}
-	}
-	if best == "" {
-		log.Warn("no non-loopback interface found; net rates disabled")
 	}
 	return best
 }

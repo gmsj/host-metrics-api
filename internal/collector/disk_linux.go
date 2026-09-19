@@ -24,14 +24,28 @@ func ioDiskNames(_ context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var names []string
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if _, err := os.Lstat(filepath.Join("/sys/block", e.Name(), "device")); err == nil {
-			names = append(names, e.Name())
+		names = append(names, e.Name())
+	}
+	return physicalBlockDevices(names, func(name string) bool {
+		_, err := os.Lstat(filepath.Join("/sys/block", name, "device"))
+		return err == nil
+	})
+}
+
+// physicalBlockDevices keeps the entries of /sys/block that hasDevice says
+// are backed by hardware. Split from ioDiskNames so the selection can be
+// tested with a scripted /sys/block instead of the real one.
+func physicalBlockDevices(names []string, hasDevice func(name string) bool) ([]string, error) {
+	var physical []string
+	for _, name := range names {
+		if hasDevice(name) {
+			physical = append(physical, name)
 		}
 	}
-	if len(names) == 0 {
+	if len(physical) == 0 {
 		return nil, errors.New("no physical block device found under /sys/block")
 	}
-	return names, nil
+	return physical, nil
 }

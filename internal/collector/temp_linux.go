@@ -38,6 +38,13 @@ func cpuTemperature(ctx context.Context) (*float64, error) {
 	if err != nil && len(readings) == 0 {
 		return nil, err
 	}
+	return selectCPUTemp(readings)
+}
+
+// selectCPUTemp picks the CPU temperature out of every hwmon reading using
+// cpuSensorPriority. Pure: it is the part worth testing, with readings that
+// look like the machines this agent runs on.
+func selectCPUTemp(readings []sensors.TemperatureStat) (*float64, error) {
 	byKey := make(map[string]float64, len(readings))
 	for _, r := range readings {
 		byKey[r.SensorKey] = r.Temperature

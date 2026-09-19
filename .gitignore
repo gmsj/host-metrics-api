@@ -4,8 +4,10 @@
 /hostmetrics.exe
 *.exe
 
-# cobertura
+# cobertura e profiling
 *.out
+*.prof
+*.test
 coverage.html
 
 # editor

@@ -37,11 +37,12 @@ type Config struct {
 	Static   collector.Static
 }
 
-// gpuStaleTicks is how many intervals a GPU reading may lag behind the system
-// tick before its fields are published as null. It matches the /healthz rule
-// (healthTicks in main): older than that and nvidia-smi is hung or crawling,
-// and repeating a stale number would look like a live one.
-const gpuStaleTicks = 3
+// StaleTicks is how many intervals a reading may lag before it is considered
+// stale. It is the one freshness rule of the agent: main derives the /healthz
+// limit from it (a snapshot older than this means the sampler is stuck), and
+// the tick applies it to the GPU reading (older than this means nvidia-smi is
+// hung or crawling, and repeating its last number would look like a live one).
+const StaleTicks = 3
 
 // Sampler owns the collection loop. Create it with New, run it with Run.
 type Sampler struct {
@@ -157,15 +158,15 @@ func (s *Sampler) readGPU(ctx context.Context) {
 }
 
 // latestGPU returns the GPU reading the tick at now should publish. A
-// reading older than gpuStaleTicks intervals keeps gpu_present (that is
-// state, not a measurement) but drops the numbers.
+// reading older than StaleTicks intervals keeps gpu_present (that is state,
+// not a measurement) but drops the numbers.
 func (s *Sampler) latestGPU(now time.Time) collector.GPUSample {
 	r := s.gpuLatest.Load()
 	if r == nil {
 		return collector.GPUSample{}
 	}
 	age := now.Sub(r.at)
-	if age <= gpuStaleTicks*s.cfg.Interval {
+	if age <= StaleTicks*s.cfg.Interval {
 		if s.gpuStale {
 			s.gpuStale = false
 			s.log.Info("gpu reading fresh again")

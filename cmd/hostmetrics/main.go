@@ -27,13 +27,9 @@ import (
 // It is the only package-level variable, and it is written once by the linker.
 var version = "dev"
 
-const (
-	// healthTicks is how many sampler intervals /healthz tolerates before
-	// declaring the snapshot stale.
-	healthTicks = 3
-	// shutdownTimeout bounds how long in-flight requests may take to finish.
-	shutdownTimeout = 5 * time.Second
-)
+// shutdownTimeout bounds how long in-flight requests may take to finish, and
+// how long main waits for the sampler afterwards.
+const shutdownTimeout = 5 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -71,8 +67,10 @@ func run() error {
 	})
 
 	srv := &http.Server{
-		Addr:    cfg.Addr(),
-		Handler: httpapi.NewHandler(smp, healthTicks*cfg.Interval, log),
+		Addr: cfg.Addr(),
+		// /healthz reports stale after sampler.StaleTicks intervals without a
+		// new snapshot: the same rule the sampler applies to its GPU reading.
+		Handler: httpapi.NewHandler(smp, sampler.StaleTicks*cfg.Interval, log),
 		// Timeouts keep a slow or malicious client from holding a connection
 		// (and a goroutine) open forever. The payload is tiny, so these are
 		// generous.

@@ -1,0 +1,64 @@
+# Continuous integration: every push to main and every pull request.
+#
+# Three jobs, deliberately separate so a lint failure does not hide a test
+# failure and each one is easy to re-run alone.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test, vet and cross-build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # A dirty go.mod/go.sum means someone forgot `make tidy`.
+      - name: go mod tidy is clean
+        run: go mod tidy -diff
+      - name: Tests with the race detector
+        run: make test
+      - name: go vet for Linux and Windows
+        run: make vet
+      # Both binaries are built on every run: the Windows one is what breaks
+      # silently when only Linux is exercised locally.
+      - name: Cross-build both binaries
+        run: make build-all
+      - name: Known vulnerabilities in dependencies
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go.mod
+
+  test-windows:
+    # Runs the test suite natively on Windows: gpu_windows.go and
+    # disk_windows.go only compile here, and the sampler/httpapi tests do not
+    # care which OS they run on. No -race: it needs a C toolchain on Windows.
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          # Pin the minor so a new linter release cannot break main on its own.
+          version: v2.13

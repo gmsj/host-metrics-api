@@ -2,12 +2,14 @@
 
 Este guia é para **colocar o agente rodando na máquina monitorada**, nos dois boots. Para desenvolvimento (build, testes, lint) veja o [README](../README.md).
 
-Os binários vêm de `make build-all`, rodado no Ubuntu, e ficam em `dist/`:
+Os binários estão na página de [Releases](https://github.com/gmsj/host-metrics-api/releases/latest) do projeto:
 
 | Sistema | Arquivo |
 |---|---|
-| Ubuntu | `dist/hostmetrics-linux-amd64` |
-| Windows | `dist/hostmetrics-windows-amd64.exe` |
+| Ubuntu | `hostmetrics-linux-amd64` |
+| Windows | `hostmetrics-windows-amd64.exe` |
+
+Cada release traz um `checksums.txt`; confira o download com `sha256sum -c checksums.txt --ignore-missing` no Linux ou `Get-FileHash` no PowerShell. Quem prefere compilar roda `make build-all` no Ubuntu e encontra os mesmos arquivos em `dist/`; os comandos abaixo assumem a pasta `dist/`, ajuste o caminho se baixou da release.
 
 O binário é autocontido. Nada precisa ser instalado antes dele. Para a GPU, basta o driver NVIDIA, que já traz o `nvidia-smi`.
 
