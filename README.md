@@ -194,9 +194,7 @@ host-metrics-api/
 │   ├── sampler/                # ticker, deltas, unidades, snapshot atômico
 │   └── httpapi/                # handlers, headers, /healthz
 ├── deploy/hostmetrics.service  # unit do systemd
-├── docs/
-│   ├── instalacao.md           # guia de instalação e uso (Ubuntu e Windows)
-│   └── go-para-quem-vem-de-python.md  # conceitos de Go com exemplos deste projeto
+├── docs/instalacao.md          # guia de instalação e uso (Ubuntu e Windows)
 ├── CHANGELOG.md · CONTRIBUTING.md · SECURITY.md · LICENSE (MIT)
 ├── Makefile
 └── .golangci.yml
@@ -225,4 +223,4 @@ make tidy     # go mod tidy
 
 Os testes não tocam hardware: o parser do `nvidia-smi`, a escolha do sensor de CPU, o filtro de discos físicos e a escolha da interface de rede são funções puras alimentadas com dados de máquinas reais; o sampler recebe coletores falsos; os handlers usam `httptest`. Testar o gopsutil em si seria testar a biblioteca dos outros. O CI roda tudo isso no Ubuntu e a suíte também no Windows, onde os arquivos com `//go:build windows` compilam de verdade.
 
-Vem de Python e nunca usou Go? [docs/go-para-quem-vem-de-python.md](docs/go-para-quem-vem-de-python.md) explica os conceitos da linguagem com exemplos deste código. Regras para contribuir em [CONTRIBUTING.md](CONTRIBUTING.md).
+Regras para contribuir em [CONTRIBUTING.md](CONTRIBUTING.md).
